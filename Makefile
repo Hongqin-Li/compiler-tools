@@ -7,7 +7,10 @@ obj/parser.cc: main.cc
 	cat $< | ../slex/obj/slex > $@
 
 test: obj/parser
-	cat test2.cc | $<
-	# cat test.cc | $<
+	# cat test1.cc | $<
+	# cat test2.cc | $<
+	# cat test3.cc | $<
+	# cat test4.cc | $<
+	cat test.cc | $<
 
 .PHONY: test
