@@ -14,6 +14,8 @@ int token;
   token = ';';
 \|
   token = '|';
+{
+  token = '{';
 
 [a-zA-Z][a-zA-Z0-9_]*
   token = ID;
@@ -27,6 +29,18 @@ int token;
 \-\-\-[^\n]*
   token = SPLIT;
 ---
+
+
+string char_symb(char c) {
+  return "_CHAR_" + to_string((int)c);
+}
+
+string unchar(string s) {
+  if (s.rfind("_CHAR_", 0) == 0) {
+    return string() + "'" + (char)stoi(s.substr(6, s.size() - 6)) + "'";
+  }
+  return s;
+}
 
 int nsymbs;
 struct S { string s; int term, nullable; };
@@ -54,6 +68,7 @@ int addsymb(const string& s) {
 
 // Productions
 vector<vector<int>> prod;
+vector<string> prod_action;
 unordered_map<int, vector<int>> phead;  // phead[i]: Indices of production whose lhs symbol is i.
 struct I {
   int pi, dot, ahead;  // dot: Index of symbol after dot
@@ -89,17 +104,22 @@ string to_string(const I& t) {
   string res;
   for (i = 0; i < n; i++) {
     if (i == t.dot) res += ". ";
-    res += symb[prod[t.pi][i]].s + " ";
+    res += unchar(symb[prod[t.pi][i]].s) + " ";
     if (i == 0) res += "=> ";
   }
   if (i == t.dot) res += ". ";
-  res += ", ahead: " + symb[t.ahead].s;
+  res += ", ahead: " + unchar(symb[t.ahead].s);
   return res + '\n';
 }
 
-void addprod(const vector<int>& p) {
+void addprod(const vector<int>& p, string f) {
   phead[p[0]].push_back(prod.size());
   prod.push_back(p);
+  if (f.empty()) {
+    if (p.size() == 2) f = "{ return $1; }";
+    else f = "{ Node d; return d; }";
+  }
+  prod_action.push_back(f);
 }
 
 /* Init nullable and first set. */
@@ -174,7 +194,7 @@ auto gotox(const unordered_set<I>& items, int x) {
 }
 
 
-enum { EMPTY, SHIFT, GOTO, REDUCE, ACCEPT };
+enum { EMPTY, SHIFT, GOTO, REDUCE, ACCEPT }; // Should be identical to output()
 struct A {
   int type, i;
   bool operator==(const A& o) const {
@@ -184,18 +204,147 @@ struct A {
 // shift/goto { type, si; }
 // reduce { type, pi; }
 string to_string(const A& a) {
-  return "{ type: " + to_string(a.type) + ", i: " + to_string(a.i) + " }";
+  return "{ .type = " + to_string(a.type) + ", .i = " + to_string(a.i) + " }";
 }
 
 void output(const vector<vector<A>>& table) {
   struct B { pair<int, int> i; A a; };
   vector<B> t;
-  for (int i = 0; i < table.size(); i++) {
-    for (int j = 0; j < table[0].size(); j++) {
-      if (table[i][j].type != EMPTY)
-        t.push_back({{i, j}, table[i][j]});
-    }
+
+  string code;
+
+  // Headers.
+  code += R"(
+#include <iostream>
+#include <vector>
+#include <cassert>
+
+)";
+
+  // Export symbol index, symb[0] is EOF.
+  // Add 128 to distinguish from char.
+  for (int i = 1; i < symb.size(); i++)
+    if (symb[i].term)
+      code += "const int " + symb[i].s + " = " + to_string(i + 128) + ";\n";
+
+  // Table for hacking char symbols.
+  vector<int> char_map;
+  char_map.push_back(symbi["$end"]); // '\0' is $end.
+  for (int i = 1; i < 128; i++) {
+    auto it = symbi.find(char_symb(i));
+    char_map.push_back(it != symbi.end() ? it->second: 0);
   }
+  code += "static int char_map[] = " + to_string(char_map) + ";\n";
+
+  // Table entry struct.
+  // Should be identical to those in parser source code.
+  code += R"(
+enum { EMPTY, SHIFT, GOTO, REDUCE, ACCEPT };
+struct A { int type, i; };
+)";
+  code += "static int nsymbs = " + to_string(table[0].size()) + ";\n";
+  code += "static int nstats = " + to_string(table.size()) + ";\n";
+
+  // The LR table.
+  code += "static struct A table[][" + to_string(table[0].size()) + "] = " + to_string(table) + ';';
+
+  // Production rules len and first symbol(target symbol).
+  vector<int> prod_first, prod_len;
+  int max_prod_len = 0;
+  for (auto& p: prod) {
+    prod_first.push_back(p[0]);
+    prod_len.push_back(p.size());
+    max_prod_len = max(max_prod_len, (int)p.size());
+  }
+  code += "static int prod_len[] = " + to_string(prod_len) + ";\n";
+  code += "static int prod_first[] = " + to_string(prod_first) + ";\n";
+
+  // Production action functions.
+  for (int i = 0; i < prod.size(); i++) {
+    code += "Node prod_" + to_string(i) + "(";
+    for (int j = 1; j < prod[i].size(); j++) {
+      code += "Node $" + to_string(j);
+      if (j != prod[i].size() - 1) code += ",";
+    }
+    code += ") " + prod_action[i] + "\n";
+  }
+
+  // Helper functions.
+  code += R"(
+/* Node is provided by user. */
+struct I {
+  int state;
+  Node data;
+};
+
+static std::vector<I> stk;
+
+void init_parser() {
+  stk.push_back({1});
+}
+
+int parse(int symb_raw, Node data) {
+  int symb;
+  if (symb_raw < 128) symb = char_map[symb_raw];
+  else symb = symb_raw - 128;
+
+  assert(symb < nsymbs);
+  // cerr << "symb: " << symb << '\n';
+
+  struct A a = table[stk.back().state][symb];
+  if (a.type == SHIFT) {
+    stk.push_back({a.i, data});
+    cerr << "parser: shift to state " << a.i << "\n";
+    return 0;
+  } else if (a.type == REDUCE) {
+    cerr << "parser: reduce ";
+    int stklen;
+    Node ret;
+    switch(a.i) {
+)";
+  for (int i = 0; i < prod.size(); i++) {
+    code +=
+"   case " + to_string(i) + ": " +
+      // For debug
+      "cerr << \"prod \" << " + to_string(i) + " << \": \" << " + to_string(unchar(symb[prod[i][0]].s)) + " << \" -> \";";
+    for (int j = 1; j < prod[i].size(); j++) code += "cerr << " + to_string(unchar(symb[prod[i][j]].s)) + " << ' ';";
+    code += "cerr << '\\n';";
+      
+    code += "stklen = stk.size(); ret = prod_" + to_string(i) + "(";
+
+    for (int j = 1; j < prod[i].size(); j++) {
+      int jj = prod[i].size() - j;
+      code += "stk[stklen-" + to_string(jj) + "].data";
+      if (j < prod[i].size() - 1) code += ", ";
+    }
+
+    code += "); stk.resize(stklen - " + to_string(prod[i].size() - 1) + "); break;\n";
+  }
+
+  code += R"(
+    default: assert(0);
+    }
+    assert(!stk.empty());
+    a = table[stk.back().state][prod_first[a.i]];
+    assert(a.type == GOTO);
+    stk.push_back({a.i, ret});
+    cerr << "parser: goto state " << a.i << "\n";
+    return parse(symb_raw, data);
+
+  } else if (a.type == ACCEPT) {
+    cerr << "parser: accept\n";
+    return 1;
+  } else {
+    cerr << "unexpected transition. ";
+    assert(0);
+  }
+  return 0;
+}
+
+
+)";
+
+  cout << code;
   debug(t.size());
 }
 
@@ -221,6 +370,7 @@ void build() {
       state[u] = s;
       table.resize(u+1, vector<A>(nsymbs+1, {EMPTY, 0}));
       // table[u] = 
+      debug(u, s);
     }
     return u;
   };
@@ -239,7 +389,12 @@ void build() {
       // debug(i, p.size());
       if (i.dot < p.size()) {
         int x = p[i.dot];
-        if (symb[x].s == "$end") continue;
+        if (symb[x].s == "$end") {
+          auto& ent = table[u][symbi["$end"]];
+          assert(ent.type == EMPTY || ent.type == ACCEPT);
+          ent = { ACCEPT, 0 };
+          continue;
+        }
 
         int v = getstate(gotox(s, x));
         A a = {symb[x].term ? SHIFT: GOTO, v};
@@ -249,25 +404,25 @@ void build() {
         auto& t = table[u][x];
         if (t.type == REDUCE && a.type == SHIFT) {
           cerr << "Shift-reduce conflict found on table[" << u << "][" << x << "].\n";
+          assert(0);
         } else if (!(table[u][x].type == EMPTY || table[u][x] == a)) {
           // debug(table[u][x], a);
           assert(table[u][x].type == EMPTY || table[u][x] == a);
         }
         t = a;
       } else {
+        assert(i.dot == p.size() && 1 <= i.ahead && i.ahead <= nsymbs);
         A a = {REDUCE, i.pi};
-
-        assert(1 <= i.ahead && i.ahead <= nsymbs);
         auto& t = table[u][i.ahead];
 
         /* Resolves shift-reduce conflicts by shifting. */
         if (t.type == SHIFT) {
           cerr << "Shift-reduce conflict found on table[" << u << "][" << i.ahead << "].\n";
+          assert(0);
           continue;
         }
 
         if (!(t.type == EMPTY || t == a)) {
-          // debug(u, i.ahead, symb[u], symb[i.ahead], t, a);
           assert(table[u][i.ahead].type == EMPTY || table[u][i.ahead] == a);
         }
         table[u][i.ahead] = a;
@@ -296,25 +451,38 @@ int main() {
    * - The third token is the first symbol provided by user.
    */
   vector<int> p = {addsymb("$start"), 3, addsymb("$end")};
-  addprod(p);
-  assert(symbi["$start"] == 1);
+  string action = "";
+  addprod(p, action);
+  assert(prod.size() == 1); // The first production is special and will "accept" when eating "$end".
+  assert(symbi["$start"] == 1 && symbi["$end"] == 2);
   symb[1].term = 0;
   p.resize(0);
 
   for (const char *s = str.c_str(); *s; ) {
-    int n = nxt(s);
+    int n = nxt((char *)s);
     string t;
     switch (token) {
-    case ';': symb[p[0]].term = 0, addprod(p), p.resize(0); break;
-    case '|': addprod(p), p.resize(1); break;
+    // TODO: Currently only support single line action function.
+    case '{':
+      assert(n == 1);
+      for (; *s != '\n'; s++) action += *s;
+      break;
 
-    case ID:
+    case ';': symb[p[0]].term = 0, addprod(p, action), p.resize(0), action = ""; break;
+    case '|': addprod(p, action), p.resize(1), action = ""; break;
+
     case CHAR:
+      // do not support '\n'
+      assert(n == 3);
+      p.push_back(addsymb(char_symb(s[1])));
+      break;
+    case ID:
       t = str.substr(s - str.c_str(), n);
       p.push_back(addsymb(t));
       break;
 
     case ':':
+      assert(p.size() == 1 && "unexpected target");
     case SPACE: break;
 
     case SPLIT:

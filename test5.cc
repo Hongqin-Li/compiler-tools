@@ -2,9 +2,14 @@
 using namespace std;
 
 ---
-Z: d | X Y Z;
-Y: c | ;
-X: Y | a;
+stm
+  : ID '=' exp
+  ;
+
+exp
+  : ID
+  | exp OP exp
+  ;
 ---
 
 int main() {
