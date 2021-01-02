@@ -46,7 +46,7 @@ int nsymbs;
 struct S { string s; int term, nullable; };
 unordered_map<string, int> symbi;
 vector<S> symb;
-vector<set<int>> first;
+vector<vector<int>> first;
 
 /* For debug */
 string to_string(const S& s) {
@@ -75,6 +75,11 @@ struct I {
   bool operator==(const I& o) const {
     return pi == o.pi && dot == o.dot && ahead == o.ahead;
   }
+  bool operator<(const I& o) const {
+    return pi < o.pi || (pi == o.pi && (dot < o.dot || (
+      dot == o.dot && ahead < o.ahead
+    )));
+  }
 };
 
 /* Hashing */
@@ -82,9 +87,9 @@ namespace std {
   template <>
   struct hash<I> {
     size_t operator()(const I& i) const {
-      return (((hash<int>()(i.pi)
-             ^ (hash<int>()(i.dot)) << 1)) >> 1)
-             ^ (hash<int>()(i.ahead) << 1);
+      return hash<int>()(i.pi)
+             ^ (hash<int>()(i.dot) << 6)
+             ^ (hash<int>()(i.ahead) << 10);
     }
   };
 
@@ -125,27 +130,30 @@ void addprod(const vector<int>& p, string f) {
 /* Init nullable and first set. */
 void init_nf() {
   cerr << "--- init_nf begin.\n";
-  first = vector<set<int>>(nsymbs + 1, set<int>());
+  auto firsts = vector<set<int>>(nsymbs + 1, set<int>());
   for (int i = 1; i <= nsymbs; i++) {
     symb[i].nullable = 0;
-    if (symb[i].term) first[i].insert(i);
+    if (symb[i].term) firsts[i].insert(i);
   }
   
   for (int stop = 0; !stop; ) {
     stop = 1;
     for (auto& p: prod) {
       int u = p[0], allnull = 1;
-      int fs = first[u].size(), ns = symb[u].nullable;
+      int fs = firsts[u].size(), ns = symb[u].nullable;
       for (int i = 1; i < p.size() && allnull; i++) {
         int v = p[i];
-        if (allnull) first[u].insert(first[v].begin(), first[v].end());
+        if (allnull) firsts[u].insert(firsts[v].begin(), firsts[v].end());
         if (!symb[v].nullable) allnull = 0;
       }
       symb[u].nullable |= allnull;
 
-      if (fs != first[u].size() || ns != symb[u].nullable) stop = 0;
+      if (fs != firsts[u].size() || ns != symb[u].nullable) stop = 0;
     }
   }
+  first.resize(nsymbs + 1);
+  for (int i = 0; i <= nsymbs; i++)
+    first[i] = vector<int>(firsts[i].begin(), firsts[i].end());
 
   for (int i = 1; i <= nsymbs; i++) {
       vector<string> firstset;
@@ -155,24 +163,30 @@ void init_nf() {
   cerr << "--- init_nf end.\n";
 }
 
-// dep: nullable
-set<int> firsts(const vector<int>& s) {
-  set<int> res;
-  for (int t: s) {
-    res.insert(first[t].begin(), first[t].end());
-    if (!symb[t].nullable) break;
-  }
-  return res;
-}
+int closure_us = 0;
 
 auto closure(const unordered_set<I>& s) {
+  chrono::steady_clock::time_point begin = std::chrono::steady_clock::now();
+  static vector<int> added(nsymbs + 1, 0);
+
   unordered_set<I> res;
+  // vector<int> ahead(prod.size() * , 0);
+
   function<void(const I&)> dfs = [&](const I& t) {
     auto& p = prod[t.pi];
     if (t.dot < p.size()) {
-      vector<int> r(p.begin() + t.dot + 1, p.end());
-      r.push_back(t.ahead);
-      auto fr = firsts(r);
+
+      vector<int> fr;
+
+      p.push_back(t.ahead);
+      for (int i = t.dot + 1; i < p.size(); i++) {
+        int si = p[i];
+        for (int i: first[si]) if (!added[i]) added[i] = 1, fr.push_back(i);
+        if (!symb[si].nullable) break;
+      }
+      p.pop_back();
+      for (int i: fr) added[i] = 0;
+
       for (int q: phead[p[t.dot]]) {
         for (int u: fr) {
           I ni = {q, 1, u};
@@ -181,15 +195,27 @@ auto closure(const unordered_set<I>& s) {
       }
     }
   };
-  for (const auto& x: s) res.insert(x), dfs(x);
+
+  for (const auto& x: s) if (res.insert(x).second) dfs(x);
+
+  chrono::steady_clock::time_point end = std::chrono::steady_clock::now();
+  closure_us += chrono::duration_cast<std::chrono::microseconds>(end - begin).count();
+
   return res;
 }
 
+int gotox_us = 0;
+
 auto gotox(const unordered_set<I>& items, int x) {
+  chrono::steady_clock::time_point begin = std::chrono::steady_clock::now();
+
   unordered_set<I> res;
   for (const auto& t: items)
     if (t.dot < prod[t.pi].size() && prod[t.pi][t.dot] == x)
       res.insert({t.pi, t.dot + 1, t.ahead});
+
+  chrono::steady_clock::time_point end = std::chrono::steady_clock::now();
+  gotox_us += chrono::duration_cast<std::chrono::microseconds>(end - begin).count();
   return closure(res);
 }
 
@@ -362,16 +388,24 @@ void build() {
 
   queue<int> q;
 
+  int dbg_getstate_us = 0;
+
   auto getstate = [&](const unordered_set<I>& s) {
     // cerr << "1";
+    chrono::steady_clock::time_point begin = std::chrono::steady_clock::now();
+
     int& u = statei[s];
     if (!u) {
       q.push(u = ++nstates);
       state[u] = s;
       table.resize(u+1, vector<A>(nsymbs+1, {EMPTY, 0}));
       // table[u] = 
-      debug(u, s);
+      // debug(u, s);
     }
+
+    chrono::steady_clock::time_point end = std::chrono::steady_clock::now();
+    dbg_getstate_us += chrono::duration_cast<std::chrono::microseconds>(end - begin).count();
+
     return u;
   };
 
@@ -404,7 +438,7 @@ void build() {
         auto& t = table[u][x];
         if (t.type == REDUCE && a.type == SHIFT) {
           cerr << "Shift-reduce conflict found on table[" << u << "][" << x << "].\n";
-          assert(0);
+          // assert(0);
         } else if (!(table[u][x].type == EMPTY || table[u][x] == a)) {
           // debug(table[u][x], a);
           assert(table[u][x].type == EMPTY || table[u][x] == a);
@@ -418,7 +452,7 @@ void build() {
         /* Resolves shift-reduce conflicts by shifting. */
         if (t.type == SHIFT) {
           cerr << "Shift-reduce conflict found on table[" << u << "][" << i.ahead << "].\n";
-          assert(0);
+          // assert(0);
           continue;
         }
 
@@ -431,7 +465,8 @@ void build() {
   }
   assert(table.size() == nstates + 1 && table[0].size() == nsymbs + 1);
   debug(nsymbs, nterms, prod.size(), nstates);
-  output(table);
+  debug(closure_us, gotox_us, dbg_getstate_us);
+  // output(table);
 }
 
 int main() {

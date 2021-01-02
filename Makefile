@@ -13,8 +13,8 @@ test: obj/parser
 	# cat test4.cc | $<
 	# cat test5.cc | $<
 	# cat test-c.cc | $<
-	cat test-my.cc | $<
-	# cat test-minic.cc | $<
+	# cat test-my.cc | $<
+	cat test-minic.cc | $<
 	# cat test-int.cc | $< > obj/test-parser.cc
 	# g++ --std=c++17 obj/test-parser.cc -o obj/test-parser
 
