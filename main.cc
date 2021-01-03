@@ -455,6 +455,8 @@ void build() {
       table.resize(u+1, vector<A>(nsymbs+1, {EMPTY, 0}));
       // table[u] = 
       // debug(u, s);
+    } else if (state[u].merge(s)) {
+      q.push(u);
     }
 
     chrono::steady_clock::time_point end = std::chrono::steady_clock::now();
@@ -473,10 +475,13 @@ void build() {
   int u0 = getstate(s0);
   debug(state[u0]);
 
+  static vector<bool> gotoed(nsymbs + 1, false);
 
   for (; q.size(); q.pop()) {
     int u = q.front();
     const auto& s = state[u];
+
+    vector<int> gotoeds;
 
     s.foreach([&](const I& i) {
       auto& p = prod[i.pi];
@@ -488,6 +493,10 @@ void build() {
           ent = { ACCEPT, 0 };
           return;
         }
+
+        if (gotoed[x]) return;
+        gotoed[x] = true;
+        gotoeds.push_back(x);
 
         int v = getstate(gotox(s, x));
         A a = {symb[x].term ? SHIFT: GOTO, v};
@@ -521,6 +530,8 @@ void build() {
         table[u][i.ahead] = a;
       }
     });
+    
+    for (int x: gotoeds) gotoed[x] = false;
 
   }
   assert(table.size() == nstates + 1 && table[0].size() == nsymbs + 1);
