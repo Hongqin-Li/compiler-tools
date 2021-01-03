@@ -67,6 +67,7 @@ int addsymb(const string& s) {
 }
 
 // Productions
+int max_dot;
 vector<vector<int>> prod;
 vector<string> prod_action;
 unordered_map<int, vector<int>> phead;  // phead[i]: Indices of production whose lhs symbol is i.
@@ -83,10 +84,11 @@ struct I {
 namespace std {
   template<typename T1, typename T2>
   struct hash<pair<T1, T2>> {
-    size_t operator()(pair<T1, T2> const &p) const {
+    size_t operator()(const pair<T1, T2>& p) const {
       return hash<T1>()(p.first) ^ (hash<T2>()(p.second) << 10);
     }
   };
+
   template <>
   struct hash<I> {
     size_t operator()(const I& i) const {
@@ -94,25 +96,32 @@ namespace std {
       return i.ahead * prod.size() * 10  + i.dot * prod.size() + i.pi;
     }
   };
-
 }
 
+int ninsert, insert_us;
+int ncstrn;
 // LR State Node
 struct N {
   unordered_map<pair<int, int>, set<int>> ahead;
   size_t hashv, hashp;
-  N() : ahead(), hashv(0), hashp(0) {}
+  N() : ahead(), hashv(0), hashp(0) {
+    ncstrn++;
+  }
   bool insert(const I& o) {
+// auto begin = std::chrono::steady_clock::now();
     pair<int, int> p = {o.pi, o.dot};
     auto& a = ahead[p];
     if (a.size() == 0) hashp += hash<pair<int, int>>()(p);
     bool chg = a.insert(o.ahead).second;
-    if (chg) hashv += hash<I>()(o);
+    // if (chg) hashv += hash<I>()(o);
+// auto end = std::chrono::steady_clock::now();
+// insert_us += chrono::duration_cast<std::chrono::microseconds>(end - begin).count();
     return chg;
   }
   void foreach(function<void(const I&)> f) const {
     for (const auto& p: ahead) {
       int pi = p.first.first, dot = p.first.second;
+      // ninsert++;
       for (int a: p.second)
         f({pi, dot, a});
     }
@@ -122,7 +131,10 @@ struct N {
     bool chg = false;
     for (auto& p: o.ahead) {
       for (int a: p.second) {
-        chg |= ahead[p.first].insert(a).second;
+        if (ahead[p.first].insert(a).second) {
+          // hashv += hash<I>()({p.first.first, p.first.second, a});
+          chg = true;
+        }
       }
     }
     return chg;
@@ -132,14 +144,14 @@ struct N {
   }
 };
 
-namespace std {
-  template <>
-  struct hash<N> {
-    size_t operator()(const N& o) const {
-      return o.hashv;
-    }
-  };
-}
+// namespace std {
+//   template <>
+//   struct hash<N> {
+//     size_t operator()(const N& o) const {
+//       return o.hashv;
+//     }
+//   };
+// }
 
 /* For debug */
 string to_string(const I& t) {
@@ -164,6 +176,7 @@ string to_string(const N& n) {
 void addprod(const vector<int>& p, string f) {
   phead[p[0]].push_back(prod.size());
   prod.push_back(p);
+  max_dot = max(max_dot, (int)p.size() + 1);
   if (f.empty()) {
     if (p.size() == 2) f = "{ return $1; }";
     else f = "{ Node d; return d; }";
@@ -217,44 +230,56 @@ int closure_us = 0;
 int nclosure = 0;
 
 void closure(N& res) {
-  chrono::steady_clock::time_point begin = std::chrono::steady_clock::now();
-  static vector<int> added(nsymbs + 1, 0);
-  static unordered_map<I, vector<int>> fmap;
+  static vector<bool> added(nsymbs + 1, false);
+  static unordered_map<I, vector<int>, hash<I>> fmap;
 
   queue<I> q;
   res.foreach([&](const I& i) { q.push(i); });
 
-  while (!q.empty()) {
-    I t = q.front();
-    q.pop();
+  auto begin = std::chrono::steady_clock::now();
+  for (; !q.empty(); q.pop()) {
+    I& t = q.front();
 
     auto& p = prod[t.pi];
     if (t.dot < p.size()) {
 
       vector<int>& fr = fmap[t];
       if (fr.empty()) {
+
         p.push_back(t.ahead);
         for (int i = t.dot + 1; i < p.size(); i++) {
           int si = p[i];
-          for (int i: first[si]) if (!added[i]) added[i] = 1, fr.push_back(i);
+          for (int i: first[si]) if (!added[i]) added[i] = true, fr.push_back(i);
           if (!symb[si].nullable) break;
         }
         p.pop_back();
-        for (int i: fr) added[i] = 0;
+        for (int i: fr) added[i] = false;
       }
 
       for (int pi: phead[p[t.dot]]) {
+        // OPT
+        // for (int u: fr) {
+        //   I ni = {pi, 1, u};
+        //   if (res.insert(ni)) q.push(move(ni));
+        // }
+
+        pair<int, int> p = {pi, 1};
+        auto& a = res.ahead[p];
+        if (a.size() == 0) res.hashp += hash<pair<int, int>>()(p);
+
         for (int u: fr) {
-          I ni = {pi, 1, u};
-          if (res.insert(ni)) q.push(ni);
+          if (a.insert(u).second) {
+            I ni = {pi, 1, u};
+            // res.hashv += hash<I>()({pi, 1, u});
+            q.push(move(ni));
+          }
+          nclosure++;
         }
       }
     }
   }
-
-  chrono::steady_clock::time_point end = std::chrono::steady_clock::now();
+  auto end = std::chrono::steady_clock::now();
   closure_us += chrono::duration_cast<std::chrono::microseconds>(end - begin).count();
-  nclosure++;
 }
 
 int gotox_us = 0;
@@ -262,17 +287,19 @@ int ngotox = 0;
 
 auto gotox(const N& items, int x) {
 
-  chrono::steady_clock::time_point begin = std::chrono::steady_clock::now();
+  auto begin = std::chrono::steady_clock::now();
 
   N res;
   items.foreach([&](const I& t) {
-    if (t.dot < prod[t.pi].size() && prod[t.pi][t.dot] == x)
+    if (t.dot < prod[t.pi].size() && prod[t.pi][t.dot] == x) {
       res.insert({t.pi, t.dot+1, t.ahead});
+      ngotox++;
+    }
   });
 
-  chrono::steady_clock::time_point end = std::chrono::steady_clock::now();
+  auto end = std::chrono::steady_clock::now();
   gotox_us += chrono::duration_cast<std::chrono::microseconds>(end - begin).count();
-  ngotox++;
+
   closure(res);
   return res;
 }
@@ -461,6 +488,7 @@ void build() {
   queue<int> q;
 
   int getstate_us = 0, ngetstate = 0;
+  int repush = 0;
 
   auto getstate = [&](const N& s) {
     // cerr << "1";
@@ -471,9 +499,8 @@ void build() {
       q.push(u = ++nstates);
       state[u] = s;
       table.resize(u+1, vector<A>(nsymbs+1, {EMPTY, 0}));
-      // table[u] = 
-      // debug(u, s);
     } else if (state[u].merge(s)) {
+      repush++;
       q.push(u);
     }
 
@@ -550,12 +577,11 @@ void build() {
     });
     
     for (int x: gotoeds) gotoed[x] = false;
-
   }
   assert(table.size() == nstates + 1 && table[0].size() == nsymbs + 1);
-  debug(nsymbs, nterms, prod.size(), nstates);
-  debug(initnf_us, closure_us, gotox_us, getstate_us);
-  debug(nclosure, ngotox, ngetstate);
+  debug(nsymbs, nterms, prod.size(), max_dot, nstates);
+  debug(initnf_us, insert_us, closure_us, gotox_us, getstate_us);
+  debug(repush, ninsert, nclosure, ngotox, ngetstate, ncstrn);
   // output(table);
 }
 
