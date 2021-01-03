@@ -71,34 +71,75 @@ vector<vector<int>> prod;
 vector<string> prod_action;
 unordered_map<int, vector<int>> phead;  // phead[i]: Indices of production whose lhs symbol is i.
 struct I {
-  int pi, dot, ahead;  // dot: Index of symbol after dot
+  int pi, dot; // dot: Index of symbol in production after dot
+  int ahead;
+  // set<int> ahead;
   bool operator==(const I& o) const {
     return pi == o.pi && dot == o.dot && ahead == o.ahead;
   }
-  bool operator<(const I& o) const {
-    return pi < o.pi || (pi == o.pi && (dot < o.dot || (
-      dot == o.dot && ahead < o.ahead
-    )));
-  }
+  // bool operator<(const I& o) const {
+  //   return pi < o.pi || (pi == o.pi && (dot < o.dot || (
+  //     dot == o.dot && ahead < o.ahead
+  //   )));
+  // }
 };
 
 /* Hashing */
 namespace std {
+  template<typename T1, typename T2>
+  struct hash<pair<T1, T2>> {
+    size_t operator()(pair<T1, T2> const &p) const {
+      return hash<T1>()(p.first) ^ (hash<T2>()(p.second) << 10);
+    }
+  };
   template <>
   struct hash<I> {
     size_t operator()(const I& i) const {
-      return hash<int>()(i.pi)
-             ^ (hash<int>()(i.dot) << 6)
-             ^ (hash<int>()(i.ahead) << 10);
+      // FIXME: 10 -> max prod len
+      return i.ahead * prod.size() * 10  + i.dot * prod.size() + i.pi;
     }
   };
 
+}
+
+// LR State Node
+struct N {
+  unordered_map<pair<int, int>, set<int>> ahead;
+  size_t hashv, hashp;
+  N() : ahead(), hashv(0), hashp(0) {}
+  bool insert(const I& o) {
+    pair<int, int> p = {o.pi, o.dot};
+    bool chg = ahead[p].insert(o.ahead).second;
+    if (chg) hashv += hash<I>()(o), hashp += hash<pair<int, int>>()(p);
+    return chg;
+  }
+  void foreach(function<void(const I&)> f) const {
+    for (const auto& p: ahead) {
+      int pi = p.first.first, dot = p.first.second;
+      for (int a: p.second)
+        f({pi, dot, a});
+    }
+  }
+  bool merge(const N& o) {
+    assert(hashp == o.hashp);
+    bool chg = false;
+    for (auto& p: o.ahead) {
+      for (int a: p.second) {
+        chg |= ahead[p.first].insert(a).second;
+      }
+    }
+    return chg;
+  }
+  bool operator==(const N& o) const {
+    return ahead == o.ahead;
+  }
+};
+
+namespace std {
   template <>
-  struct hash<unordered_set<I>> {
-    size_t operator()(const unordered_set<I>& s) const {
-      size_t res = 0;
-      for (const auto& s: s) res ^= hash<I>()(s);
-      return res;
+  struct hash<N> {
+    size_t operator()(const N& o) const {
+      return o.hashv;
     }
   };
 }
@@ -115,6 +156,12 @@ string to_string(const I& t) {
   if (i == t.dot) res += ". ";
   res += ", ahead: " + unchar(symb[t.ahead].s);
   return res + '\n';
+}
+
+string to_string(const N& n) {
+  vector<I> s;
+  n.foreach([&](const I& i) { s.push_back(i); });
+  return to_string(s);
 }
 
 void addprod(const vector<int>& p, string f) {
@@ -164,61 +211,68 @@ void init_nf() {
 }
 
 int closure_us = 0;
+int nclosure = 0;
 
-auto closure(const unordered_set<I>& s) {
+void closure(N& res) {
   chrono::steady_clock::time_point begin = std::chrono::steady_clock::now();
   static vector<int> added(nsymbs + 1, 0);
+  static unordered_map<I, vector<int>> fmap;
 
-  unordered_set<I> res;
-  // vector<int> ahead(prod.size() * , 0);
+  queue<I> q;
+  res.foreach([&](const I& i) { q.push(i); });
 
-  function<void(const I&)> dfs = [&](const I& t) {
+  while (!q.empty()) {
+    I t = q.front();
+    q.pop();
+
     auto& p = prod[t.pi];
     if (t.dot < p.size()) {
 
-      vector<int> fr;
-
-      p.push_back(t.ahead);
-      for (int i = t.dot + 1; i < p.size(); i++) {
-        int si = p[i];
-        for (int i: first[si]) if (!added[i]) added[i] = 1, fr.push_back(i);
-        if (!symb[si].nullable) break;
+      vector<int>& fr = fmap[t];
+      if (fr.empty()) {
+        p.push_back(t.ahead);
+        for (int i = t.dot + 1; i < p.size(); i++) {
+          int si = p[i];
+          for (int i: first[si]) if (!added[i]) added[i] = 1, fr.push_back(i);
+          if (!symb[si].nullable) break;
+        }
+        p.pop_back();
+        for (int i: fr) added[i] = 0;
       }
-      p.pop_back();
-      for (int i: fr) added[i] = 0;
 
-      for (int q: phead[p[t.dot]]) {
+      for (int pi: phead[p[t.dot]]) {
         for (int u: fr) {
-          I ni = {q, 1, u};
-          if (res.insert(ni).second) dfs(ni);
+          I ni = {pi, 1, u};
+          if (res.insert(ni)) q.push(ni);
         }
       }
     }
-  };
-
-  for (const auto& x: s) if (res.insert(x).second) dfs(x);
+  }
 
   chrono::steady_clock::time_point end = std::chrono::steady_clock::now();
   closure_us += chrono::duration_cast<std::chrono::microseconds>(end - begin).count();
-
-  return res;
+  nclosure++;
 }
 
 int gotox_us = 0;
+int ngotox = 0;
 
-auto gotox(const unordered_set<I>& items, int x) {
+auto gotox(const N& items, int x) {
+
   chrono::steady_clock::time_point begin = std::chrono::steady_clock::now();
 
-  unordered_set<I> res;
-  for (const auto& t: items)
+  N res;
+  items.foreach([&](const I& t) {
     if (t.dot < prod[t.pi].size() && prod[t.pi][t.dot] == x)
-      res.insert({t.pi, t.dot + 1, t.ahead});
+      res.insert({t.pi, t.dot+1, t.ahead});
+  });
 
   chrono::steady_clock::time_point end = std::chrono::steady_clock::now();
   gotox_us += chrono::duration_cast<std::chrono::microseconds>(end - begin).count();
-  return closure(res);
+  ngotox++;
+  closure(res);
+  return res;
 }
-
 
 enum { EMPTY, SHIFT, GOTO, REDUCE, ACCEPT }; // Should be identical to output()
 struct A {
@@ -383,14 +437,14 @@ void build() {
   vector<vector<A>> table;
 
   int nstates = 0;
-  unordered_map<int, unordered_set<I>> state;
-  unordered_map<unordered_set<I>, int> statei;
+  unordered_map<int, N> state;
+  unordered_map<N, int> statei;
 
   queue<int> q;
 
-  int dbg_getstate_us = 0;
+  int getstate_us = 0, ngetstate = 0;
 
-  auto getstate = [&](const unordered_set<I>& s) {
+  auto getstate = [&](const N& s) {
     // cerr << "1";
     chrono::steady_clock::time_point begin = std::chrono::steady_clock::now();
 
@@ -404,30 +458,35 @@ void build() {
     }
 
     chrono::steady_clock::time_point end = std::chrono::steady_clock::now();
-    dbg_getstate_us += chrono::duration_cast<std::chrono::microseconds>(end - begin).count();
+    getstate_us += chrono::duration_cast<std::chrono::microseconds>(end - begin).count();
+    ngetstate++;
 
     return u;
   };
 
   debug(prod), debug(phead), debug(symb);
 
-  int u0 = getstate(closure({{0, 1, 1}}));
+  N s0;
+  assert(s0.hashv == 0);
+  s0.insert({0, 1, 1});
+  closure(s0);
+  int u0 = getstate(s0);
   debug(state[u0]);
+
 
   for (; q.size(); q.pop()) {
     int u = q.front();
-    auto& s = state[u];
-    // debug(u, s);
-    for (auto& i: s) {
+    const auto& s = state[u];
+
+    s.foreach([&](const I& i) {
       auto& p = prod[i.pi];
-      // debug(i, p.size());
       if (i.dot < p.size()) {
         int x = p[i.dot];
         if (symb[x].s == "$end") {
           auto& ent = table[u][symbi["$end"]];
           assert(ent.type == EMPTY || ent.type == ACCEPT);
           ent = { ACCEPT, 0 };
-          continue;
+          return;
         }
 
         int v = getstate(gotox(s, x));
@@ -453,7 +512,7 @@ void build() {
         if (t.type == SHIFT) {
           cerr << "Shift-reduce conflict found on table[" << u << "][" << i.ahead << "].\n";
           // assert(0);
-          continue;
+          return;
         }
 
         if (!(t.type == EMPTY || t == a)) {
@@ -461,11 +520,13 @@ void build() {
         }
         table[u][i.ahead] = a;
       }
-    }
+    });
+
   }
   assert(table.size() == nstates + 1 && table[0].size() == nsymbs + 1);
   debug(nsymbs, nterms, prod.size(), nstates);
-  debug(closure_us, gotox_us, dbg_getstate_us);
+  debug(closure_us, gotox_us, getstate_us);
+  debug(nclosure, ngotox, ngetstate);
   // output(table);
 }
 
