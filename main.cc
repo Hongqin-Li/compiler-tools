@@ -77,11 +77,6 @@ struct I {
   bool operator==(const I& o) const {
     return pi == o.pi && dot == o.dot && ahead == o.ahead;
   }
-  // bool operator<(const I& o) const {
-  //   return pi < o.pi || (pi == o.pi && (dot < o.dot || (
-  //     dot == o.dot && ahead < o.ahead
-  //   )));
-  // }
 };
 
 /* Hashing */
@@ -109,8 +104,10 @@ struct N {
   N() : ahead(), hashv(0), hashp(0) {}
   bool insert(const I& o) {
     pair<int, int> p = {o.pi, o.dot};
-    bool chg = ahead[p].insert(o.ahead).second;
-    if (chg) hashv += hash<I>()(o), hashp += hash<pair<int, int>>()(p);
+    auto& a = ahead[p];
+    if (a.size() == 0) hashp += hash<pair<int, int>>()(p);
+    bool chg = a.insert(o.ahead).second;
+    if (chg) hashv += hash<I>()(o);
     return chg;
   }
   void foreach(function<void(const I&)> f) const {
@@ -174,9 +171,13 @@ void addprod(const vector<int>& p, string f) {
   prod_action.push_back(f);
 }
 
+int initnf_us = 0;
 /* Init nullable and first set. */
 void init_nf() {
   cerr << "--- init_nf begin.\n";
+
+  auto begin = std::chrono::steady_clock::now();
+
   auto firsts = vector<set<int>>(nsymbs + 1, set<int>());
   for (int i = 1; i <= nsymbs; i++) {
     symb[i].nullable = 0;
@@ -207,6 +208,8 @@ void init_nf() {
       for (auto u: first[i]) firstset.push_back(symb[u].s);
       debug(symb[i].s, firstset);
   }
+  auto end = std::chrono::steady_clock::now();
+  initnf_us += chrono::duration_cast<std::chrono::microseconds>(end - begin).count();
   cerr << "--- init_nf end.\n";
 }
 
@@ -436,9 +439,24 @@ void build() {
 
   vector<vector<A>> table;
 
+  struct Hashi {
+    size_t operator()(const N& o) const {
+      return o.hashp;
+    }
+  };
+  struct Equali {
+    bool operator()(const N& a, const N& b) const {
+      if (a.hashp != b.hashp  || a.ahead.size() != b.ahead.size()) return false;
+      for (auto& p: a.ahead) {
+        if (b.ahead.find(p.first) == b.ahead.end()) return false;
+      }
+      return true;
+    }
+  };
+
   int nstates = 0;
   unordered_map<int, N> state;
-  unordered_map<N, int> statei;
+  unordered_map<N, int, Hashi, Equali> statei;
 
   queue<int> q;
 
@@ -536,7 +554,7 @@ void build() {
   }
   assert(table.size() == nstates + 1 && table[0].size() == nsymbs + 1);
   debug(nsymbs, nterms, prod.size(), nstates);
-  debug(closure_us, gotox_us, getstate_us);
+  debug(initnf_us, closure_us, gotox_us, getstate_us);
   debug(nclosure, ngotox, ngetstate);
   // output(table);
 }
@@ -593,8 +611,6 @@ int main() {
     case SPACE: break;
 
     case SPLIT:
-      // init_nullable();
-      // init_first();
       init_nf();
       build();
 
