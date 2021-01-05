@@ -2,6 +2,30 @@
 #include "../slex/debug.h"
 using namespace std;
 
+// hash set: phmap > pbds > std
+#include "parallel_hashmap/phmap.h"
+using N = phmap::flat_hash_set<int>;
+// #include <ext/pb_ds/assoc_container.hpp>
+// using namespace __gnu_pbds;
+// using N = gp_hash_table<int, null_type>;
+// using N = unordered_set<int>;
+
+struct HashN {
+  inline size_t operator()(const N& x) const {
+    size_t h = x.size();
+    for (auto& i: x) h ^= hash<int>()(i);
+    return h;
+  }
+};
+
+struct EqualN {
+  inline bool operator()(const N& a, const N& b) const {
+    if (a.size() != b.size()) return false;
+    for (auto& i: a) if (b.find(i) == b.end()) return false;
+    return true;
+  }
+};
+
 enum { SPACE = 128, ID, CHAR, SPLIT };
 
 int token;
@@ -88,7 +112,7 @@ int initnf_us = 0;
 void init_nf() {
   cerr << "--- init_nf begin.\n";
 
-  auto begin = std::chrono::steady_clock::now();
+  auto begin = chrono::steady_clock::now();
 
   auto firsts = vector<set<int>>(nsymbs + 1, set<int>());
   for (int i = 1; i <= nsymbs; i++) {
@@ -120,8 +144,8 @@ void init_nf() {
       for (auto u: first[i]) firstset.push_back(symb[u].s);
       debug(symb[i].s, firstset);
   }
-  auto end = std::chrono::steady_clock::now();
-  initnf_us += chrono::duration_cast<std::chrono::microseconds>(end - begin).count();
+  auto end = chrono::steady_clock::now();
+  initnf_us += chrono::duration_cast<chrono::microseconds>(end - begin).count();
   cerr << "--- init_nf end.\n";
 }
 
@@ -131,15 +155,13 @@ struct C {
 };
 vector<C> node;
 
-using N = unordered_set<int>;
-
 inline int encode(int pi, int dot, int a) {
   return pi * (max_dot + 1) * (nsymbs+1) + dot * (nsymbs+1) + a;
 }
 
 int cgraph_us;
 void init_cgraph() {
-  auto begin = std::chrono::steady_clock::now();
+  auto begin = chrono::steady_clock::now();
 
   vector<bool> added(nsymbs + 1, false);
   node = vector<C>(prod.size() * (max_dot + 1) * (nsymbs + 1));
@@ -173,27 +195,19 @@ void init_cgraph() {
     sort(c.adj.begin(), c.adj.end());
     c.adj.resize(unique(c.adj.begin(), c.adj.end()) - c.adj.begin());
   }
-  auto end = std::chrono::steady_clock::now();
-  cgraph_us += chrono::duration_cast<std::chrono::microseconds>(end - begin).count();
+  auto end = chrono::steady_clock::now();
+  cgraph_us += chrono::duration_cast<chrono::microseconds>(end - begin).count();
 }
 
 /* Hashing */
-namespace std {
-  template<typename T1, typename T2>
-  struct hash<pair<T1, T2>> {
-    size_t operator()(const pair<T1, T2>& p) const {
-      return hash<T1>()(p.first) ^ (hash<T2>()(p.second) << 10);
-    }
-  };
-  template<typename T>
-  struct hash<unordered_set<T>> {
-    size_t operator()(const unordered_set<T>& x) const {
-      size_t h = x.size();
-      for (auto i: x) h ^= hash<T>()(i);
-      return h;
-    }
-  };
-}
+// namespace std {
+//   template<typename T1, typename T2>
+//   struct hash<pair<T1, T2>> {
+//     size_t operator()(const pair<T1, T2>& p) const {
+//       return hash<T1>()(p.first) ^ (hash<T2>()(p.second) << 10);
+//     }
+//   };
+// }
 
 enum { EMPTY, SHIFT, GOTO, REDUCE, ACCEPT }; // Should be identical to output()
 struct A {
@@ -375,46 +389,51 @@ int parse(int symb_raw, Node data) {
   debug(t.size());
 }
 
-int closure_us = 0, nclosure = 0;
+int closure_us = 0, nclosure = 0, nbfs = 0;
 inline void closure(N& s) {
-  auto begin = std::chrono::steady_clock::now();
-  static unordered_map<N, N> cache;
+  static unordered_map<N, N, HashN, EqualN> cache;
+  auto begin = chrono::steady_clock::now();
   auto& t = cache[s];
-  if (!t.size()) {
+  if (t.size()) s = t;
+  else {
     queue<int> q;
     for (int i: s) q.push(i);
     for (; !q.empty(); q.pop()) {
+      nbfs++;
       for (int v: node[q.front()].adj)
         if (s.insert(v).second)
           q.push(v);
     }
     t = s;
-  } else s = t;
-  auto end = std::chrono::steady_clock::now();
-  closure_us += chrono::duration_cast<std::chrono::microseconds>(end - begin).count();
+  }
+  closure_us += chrono::duration_cast<chrono::microseconds>(chrono::steady_clock::now() - begin).count();
   nclosure++;
 }
 
-int gotox_us = 0, ngotox = 0;
+int gotox_us = 0, ngotox = 0, ncore = 0, ncores = 0;
 auto gotox(const N& s, int x) {
-  auto begin = std::chrono::steady_clock::now();
+  auto begin = chrono::steady_clock::now();
+  assert(s.size());
 
   N t;
   for (int u: s) {
-    int pi = node[u].pi, dot = node[u].dot, a = node[u].ahead;
+    int pi = node[u].pi, dot = node[u].dot;
     if (dot < prod[pi].size() && prod[pi][dot] == x) {
-      t.insert(encode(pi, dot+1, a));
+      t.insert(encode(pi, dot+1, node[u].ahead));
+      ncore++;
     }
+    ncores++;
   }
 
-  auto end = std::chrono::steady_clock::now();
-  gotox_us += chrono::duration_cast<std::chrono::microseconds>(end - begin).count();
+  gotox_us += chrono::duration_cast<chrono::microseconds>(chrono::steady_clock::now() - begin).count();
   ngotox++;
 
   closure(t);
+  assert(t.size());
   return t;
 }
 
+int getstate_us = 0, ngetstate = 0;
 void build() {
   int nterms = 0;
   assert(nsymbs + 1 == symb.size());
@@ -424,24 +443,18 @@ void build() {
   vector<vector<A>> table;
 
   int nstates = 0;
-  // vector<N> state(1);
   unordered_map<int, N> state;
-  unordered_map<N, int> statei;
+  unordered_map<N, int, HashN, EqualN> statei;
 
   queue<int> q;
 
-  int getstate_us = 0, ngetstate = 0;
   auto getstate = [&](const N& s) {
     auto begin = std::chrono::steady_clock::now();
 
     int& u = statei[s];
     if (!u) {
       q.push(u = ++nstates);
-      // assert(state.find(u) == state.end());
-      // assert(u == state.size() + 1);
       state[u] = s;
-      // state.push_back(s);
-      // assert(state[u] == s);
       ngetstate++;
       table.resize(u+1, vector<A>(nsymbs+1, {EMPTY, 0}));
     }
@@ -464,12 +477,10 @@ void build() {
 
   for (; q.size(); q.pop()) {
     int u = q.front();
-    // assert(state.find(u) != state.end());
-    // assert(u < state.size());
     const auto& s = state[u];
 
     vector<bool> vis(nsymbs + 1, false);
-    for (auto ns: s) {
+    for (auto& ns: s) {
       I i = {node[ns].pi, node[ns].dot, node[ns].ahead};
       auto& p = prod[i.pi];
       if (i.dot < p.size()) {
@@ -484,7 +495,6 @@ void build() {
           ent = { ACCEPT, 0 };
           continue;
         }
-
         int v = getstate(gotox(s, x));
         A a = {symb[x].term ? SHIFT: GOTO, v};
 
@@ -518,8 +528,6 @@ void build() {
   }
   assert(table.size() == nstates + 1 && table[0].size() == nsymbs + 1);
   debug(nsymbs, nterms, prod.size(), max_dot, nstates, state.size());
-  debug(initnf_us, cgraph_us);
-  debug(closure_us, gotox_us, getstate_us), debug(nclosure, ngotox, ngetstate);
   // output(table);
 }
 
@@ -578,6 +586,8 @@ int main() {
       init_nf();
       init_cgraph();
       build();
+      debug(initnf_us, cgraph_us, closure_us, gotox_us, getstate_us);
+      debug(nbfs, nclosure, ncore, ncores, ngotox, ngetstate);
 
       n += s - str.c_str();
       cout << str.substr(n, str.size() - n);
