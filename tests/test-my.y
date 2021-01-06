@@ -16,7 +16,7 @@ prog
   | prog def
   ;
 
-pexp
+eprog
   : prog
   | prog THEN exp
   ;
@@ -26,6 +26,7 @@ stm
   | BREAK | BREAK exp
   | RETURN | RETURN exp
   | CONTINUE
+  | call
   ;
 
 exp
@@ -64,11 +65,11 @@ loop
 
 if
   : ifelif
-  | ifelif ELSE '{' pexp '}'
+  | ifelif ELSE '{' eprog '}'
   ;
 ifelif
-  : IF exp '{' pexp '}'
-  | ifelif ELSE IF exp '{' pexp '}'
+  : IF exp '{' eprog '}'
+  | ifelif ELSE IF exp '{' eprog '}'
   ;
 
 fn

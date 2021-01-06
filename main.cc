@@ -2,30 +2,6 @@
 #include "../slex/debug.h"
 using namespace std;
 
-// hash set: phmap > pbds > std
-#include "parallel_hashmap/phmap.h"
-using N = phmap::flat_hash_set<int>;
-// #include <ext/pb_ds/assoc_container.hpp>
-// using namespace __gnu_pbds;
-// using N = gp_hash_table<int, null_type>;
-// using N = unordered_set<int>;
-
-struct HashN {
-  inline size_t operator()(const N& x) const {
-    size_t h = x.size();
-    for (auto& i: x) h ^= hash<int>()(i);
-    return h;
-  }
-};
-
-struct EqualN {
-  inline bool operator()(const N& a, const N& b) const {
-    if (a.size() != b.size()) return false;
-    for (auto& i: a) if (b.find(i) == b.end()) return false;
-    return true;
-  }
-};
-
 enum { SPACE = 128, ID, CHAR, SPLIT };
 
 int token;
@@ -110,8 +86,6 @@ void addprod(const vector<int>& p, string f) {
 int initnf_us = 0;
 /* Init nullable and first set. */
 void init_nf() {
-  cerr << "--- init_nf begin.\n";
-
   auto begin = chrono::steady_clock::now();
 
   auto firsts = vector<set<int>>(nsymbs + 1, set<int>());
@@ -146,7 +120,6 @@ void init_nf() {
   }
   auto end = chrono::steady_clock::now();
   initnf_us += chrono::duration_cast<chrono::microseconds>(end - begin).count();
-  cerr << "--- init_nf end.\n";
 }
 
 struct C {
@@ -154,10 +127,85 @@ struct C {
   vector<int> adj;
 };
 vector<C> node;
+vector<vector<vector<int>>> nxtx;
 
 inline int encode(int pi, int dot, int a) {
   return pi * (max_dot + 1) * (nsymbs+1) + dot * (nsymbs+1) + a;
 }
+
+// hash set: phmap > pbds > std
+#include "parallel_hashmap/phmap.h"
+#ifdef LALR
+struct N {
+  phmap::flat_hash_map<int, phmap::flat_hash_set<int>> ahead;
+  auto begin() const { return ahead.begin(); }
+  auto end() const { return ahead.end(); }
+  auto size() const { return ahead.size(); }
+  auto insert(int x) {
+    int a = x % (nsymbs + 1);
+    return ahead[x-a].insert(a);
+  }
+};
+#else
+using N = phmap::flat_hash_set<int>;
+#endif
+// #include <ext/pb_ds/assoc_container.hpp>
+// using namespace __gnu_pbds;
+// using N = gp_hash_table<int, null_type>;
+// using N = unordered_set<int>;
+
+struct HashN {
+  inline size_t operator()(const N& x) const {
+    size_t h = x.size();
+#ifdef LALR
+    for (auto& p: x.ahead) {
+      for (auto& a: p.second)
+        h ^= hash<int>()(a + p.first);
+    }
+#else
+    for (auto& i: x) h ^= hash<int>()(i);
+#endif
+    return h;
+  }
+};
+
+struct EqualN {
+  inline bool operator()(const N& a, const N& b) const {
+    if (a.size() != b.size()) return false;
+#ifdef LALR
+    for (auto& p: a.ahead) {
+      auto it = b.ahead.find(p.first);
+      if (it == b.ahead.end()) return false;
+      if (p.second.size() != it->second.size()) return false;
+      for (auto& x: p.second)
+        if (it->second.find(x) == it->second.end()) return false;
+    }
+#else
+    for (auto& i: a) if (b.find(i) == b.end()) return false;
+#endif
+    return true;
+  }
+};
+
+#ifdef LALR
+struct HashNL {
+  inline size_t operator()(const N& x) const {
+    size_t h = x.size();
+    for (auto& p: x.ahead) h ^= p.first;
+    return h;
+  }
+};
+struct EqualNL {
+  inline bool operator()(const N& a, const N& b) const {
+    if (a.size() != b.size()) return false;
+    for (auto& p: a.ahead) {
+      auto it = b.ahead.find(p.first);
+      if (it == b.ahead.end()) return false;
+    }
+    return true;
+  }
+};
+#endif
 
 int cgraph_us;
 void init_cgraph() {
@@ -199,16 +247,6 @@ void init_cgraph() {
   cgraph_us += chrono::duration_cast<chrono::microseconds>(end - begin).count();
 }
 
-/* Hashing */
-// namespace std {
-//   template<typename T1, typename T2>
-//   struct hash<pair<T1, T2>> {
-//     size_t operator()(const pair<T1, T2>& p) const {
-//       return hash<T1>()(p.first) ^ (hash<T2>()(p.second) << 10);
-//     }
-//   };
-// }
-
 enum { EMPTY, SHIFT, GOTO, REDUCE, ACCEPT }; // Should be identical to output()
 struct A {
   int type, i;
@@ -221,8 +259,9 @@ struct A {
 
 // shift/goto { type, si; }
 // reduce { type, pi; }
-string to_string(const A& a) {
-  return "{ .type = " + to_string(a.type) + ", .i = " + to_string(a.i) + " }";
+inline string to_string(const A& a) {
+  string s = "{.type="; s += to_string(a.type); s += ",.i="; s += to_string(a.i); s += "}";
+  return s;
 }
 
 string to_string(const S& s) {
@@ -244,10 +283,18 @@ string to_string(const I& t) {
 
 string to_string(const N& n) {
   vector<I> s;
+#ifdef LALR
+  for (auto& p: n.ahead) {
+    int pd = p.first / (nsymbs + 1), pi = pd / (max_dot + 1), dot = pd % (max_dot + 1);
+    for (auto& a: p.second) s.push_back({pi, dot, a});
+  }
+#else
   for (auto i: n) { s.push_back({node[i].pi, node[i].dot, node[i].ahead}); }
+#endif
   return to_string(s);
 }
 
+int output_us = 0;
 void output(const vector<vector<A>>& table) {
   struct B { pair<int, int> i; A a; };
   vector<B> t;
@@ -286,8 +333,11 @@ struct A { int type, i; };
   code += "static int nsymbs = " + to_string(table[0].size()) + ";\n";
   code += "static int nstats = " + to_string(table.size()) + ";\n";
 
+  auto begin = chrono::steady_clock::now();
   // The LR table.
   code += "static struct A table[][" + to_string(table[0].size()) + "] = " + to_string(table) + ';';
+
+  output_us += chrono::duration_cast<chrono::microseconds>(chrono::steady_clock::now() - begin).count();
 
   // Production rules len and first symbol(target symbol).
   vector<int> prod_first, prod_len;
@@ -386,7 +436,7 @@ int parse(int symb_raw, Node data) {
 )";
 
   cout << code;
-  debug(t.size());
+  debug(code.size(), t.size());
 }
 
 int closure_us = 0, nclosure = 0, nbfs = 0;
@@ -397,7 +447,11 @@ inline void closure(N& s) {
   if (t.size()) s = t;
   else {
     queue<int> q;
+#ifdef LALR
+    for (auto& p: s.ahead) for (auto& a: p.second) q.push(p.first + a);
+#else
     for (int i: s) q.push(i);
+#endif
     for (; !q.empty(); q.pop()) {
       nbfs++;
       for (int v: node[q.front()].adj)
@@ -411,30 +465,19 @@ inline void closure(N& s) {
 }
 
 int gotox_us = 0, ngotox = 0, ncore = 0, ncores = 0;
-auto gotox(const N& s, int x) {
+auto gotox(int u, int x) {
   auto begin = chrono::steady_clock::now();
-  assert(s.size());
-
   N t;
-  for (int u: s) {
-    int pi = node[u].pi, dot = node[u].dot;
-    if (dot < prod[pi].size() && prod[pi][dot] == x) {
-      t.insert(encode(pi, dot+1, node[u].ahead));
-      ncore++;
-    }
-    ncores++;
-  }
-
+  for (int i: nxtx[u][x]) t.insert(i);
   gotox_us += chrono::duration_cast<chrono::microseconds>(chrono::steady_clock::now() - begin).count();
   ngotox++;
-
   closure(t);
-  assert(t.size());
   return t;
 }
 
-int getstate_us = 0, ngetstate = 0;
+int getstate_us = 0, ngetstate = 0, nitems = 0, build_us = 0;
 void build() {
+  auto begin = chrono::steady_clock::now();
   int nterms = 0;
   assert(nsymbs + 1 == symb.size());
   for (int i = 1; i <= nsymbs; i++) if (symb[i].term) nterms++;
@@ -444,23 +487,62 @@ void build() {
 
   int nstates = 0;
   unordered_map<int, N> state;
+#ifdef LALR
+  unordered_map<N, int, HashNL, EqualNL> statei;
+#else
   unordered_map<N, int, HashN, EqualN> statei;
+#endif
 
   queue<int> q;
 
   auto getstate = [&](const N& s) {
-    auto begin = std::chrono::steady_clock::now();
+    auto begin = chrono::steady_clock::now();
 
     int& u = statei[s];
     if (!u) {
       q.push(u = ++nstates);
       state[u] = s;
-      ngetstate++;
+      nitems += s.size();
       table.resize(u+1, vector<A>(nsymbs+1, {EMPTY, 0}));
-    }
 
-    auto end = std::chrono::steady_clock::now();
-    getstate_us += chrono::duration_cast<std::chrono::microseconds>(end - begin).count();
+      nxtx.resize(u+1, vector<vector<int>>(nsymbs+1));
+
+#ifdef LALR
+      for (auto& p: s.ahead) {
+        int pd = p.first / (nsymbs + 1), pi = pd / (max_dot+1), dot = pd % (max_dot + 1);
+        for (auto& a: p.second)
+          if (dot < prod[pi].size())
+            nxtx[u][prod[pi][dot]].push_back(p.first + nsymbs+1 + a);
+      }
+#else
+      for (int ci: s) {
+        int pi = node[ci].pi, dot = node[ci].dot;
+        if (dot < prod[pi].size())
+          nxtx[u][prod[pi][dot]].push_back(encode(pi, dot+1, node[ci].ahead));
+      }
+#endif
+    }
+#ifdef LALR
+    else {
+      int chg = false;
+      auto& t = state[u];
+      for (auto& p: s.ahead) {
+        assert(t.ahead.find(p.first) != t.ahead.end());
+        int pd = p.first / (nsymbs + 1), pi = pd / (max_dot+1), dot = pd % (max_dot + 1);
+        auto& ta = t.ahead[p.first];
+        for (auto& a: p.second) {
+          if (ta.insert(a).second) {
+            nxtx[u][prod[pi][dot]].push_back(p.first + nsymbs+1 + a);
+            chg = true;
+          }
+        }
+      }
+      if (chg) q.push(u);
+    }
+#endif
+
+    getstate_us += chrono::duration_cast<chrono::microseconds>(chrono::steady_clock::now() - begin).count();
+    ngetstate++;
     return u;
   };
 
@@ -480,8 +562,17 @@ void build() {
     const auto& s = state[u];
 
     vector<bool> vis(nsymbs + 1, false);
+#ifdef LALR
+    for (auto& _p: s) {
+      int _pd = _p.first / (nsymbs + 1);
+      int _pi = _pd / (max_dot + 1), _dot = _pd % (max_dot + 1);
+      for (auto& _a: _p.second) {
+        I i = {_pi, _dot, _a};
+        assert(_dot != 0);
+#else
     for (auto& ns: s) {
       I i = {node[ns].pi, node[ns].dot, node[ns].ahead};
+#endif
       auto& p = prod[i.pi];
       if (i.dot < p.size()) {
         int x = p[i.dot];
@@ -495,16 +586,16 @@ void build() {
           ent = { ACCEPT, 0 };
           continue;
         }
-        int v = getstate(gotox(s, x));
+        int v = getstate(gotox(u, x));
         A a = {symb[x].term ? SHIFT: GOTO, v};
 
         assert(1 <= x && x <= nsymbs);
         auto& t = table[u][x];
         if (t.type == REDUCE && a.type == SHIFT) {
-          cerr << "Shift-reduce conflict found on table[" << u << "][" << x << "].\n";
-          // assert(0);
-        } else if (!(table[u][x].type == EMPTY || table[u][x] == a)) {
-          assert(table[u][x].type == EMPTY || table[u][x] == a);
+          cerr << "shift-reduce conflict found at table[" << u << "][" << x << "]\n";
+        } else if (t.type != EMPTY && !(t == a)) {
+          cerr << "conflict found at table[" << u << "][" << x << "]\n";
+          assert(0 && "unexpected conflict");
         }
         t = a;
       } else {
@@ -513,22 +604,27 @@ void build() {
         auto& t = table[u][i.ahead];
 
         /* Resolves shift-reduce conflicts by shifting. */
-        if (t.type == SHIFT) {
-          cerr << "Shift-reduce conflict found on table[" << u << "][" << i.ahead << "].\n";
-          // assert(0);
+        switch (t.type) {
+        case EMPTY: break;
+        case SHIFT:
+          cerr << "shift-reduce conflict found at table[" << u << "][" << i.ahead << "]\n";
           continue;
+        case REDUCE: assert(t == a && "reduce-reduce conflict found"); break;
+        default: assert(0 && "unexpected non-empty type");
         }
 
-        if (!(t.type == EMPTY || t == a)) {
-          assert(table[u][i.ahead].type == EMPTY || table[u][i.ahead] == a);
-        }
-        table[u][i.ahead] = a;
+        t = a;
       }
-    };
+    }
+#ifdef LALR
+    }
+#endif
   }
+  build_us += chrono::duration_cast<chrono::microseconds>(chrono::steady_clock::now() - begin).count();
+
   assert(table.size() == nstates + 1 && table[0].size() == nsymbs + 1);
   debug(nsymbs, nterms, prod.size(), max_dot, nstates, state.size());
-  // output(table);
+  output(table);
 }
 
 int main() {
@@ -586,8 +682,8 @@ int main() {
       init_nf();
       init_cgraph();
       build();
-      debug(initnf_us, cgraph_us, closure_us, gotox_us, getstate_us);
-      debug(nbfs, nclosure, ncore, ncores, ngotox, ngetstate);
+      debug(initnf_us, cgraph_us, closure_us, gotox_us, getstate_us, build_us, output_us);
+      debug(nbfs, nclosure, ncore, ncores, ngotox, ngetstate, nitems);
 
       n += s - str.c_str();
       cout << str.substr(n, str.size() - n);
