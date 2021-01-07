@@ -22,7 +22,6 @@ bench() {
 }
 
 
-# Test C
 echo "- benching C99..."
 bench $N "make test-c.y"; echo "- performance of yacc: $bench_ret"
 bench $N "make test-c.cc"; echo "- performance of my: $bench_ret"
@@ -31,4 +30,11 @@ echo "- benching SysY..."
 bench $N "make test-sysy.y"; echo "- performance of yacc: $bench_ret"
 bench $N "make test-sysy.cc"; echo "- performance of my: $bench_ret"
 
+echo "- benching Pascal..."
+bench $N "make test-pascal.y"; echo "- performance of yacc: $bench_ret"
+bench $N "make test-pascal.cc"; echo "- performance of my: $bench_ret"
+
+echo "- benching ECMAScript 1 ..."
+bench $N "make test-js.y"; echo "- performance of yacc: $bench_ret"
+bench $N "make test-js.cc"; echo "- performance of my: $bench_ret"
 
